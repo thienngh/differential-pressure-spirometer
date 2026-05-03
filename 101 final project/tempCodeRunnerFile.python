@@ -1,0 +1,138 @@
+import serial
+import matplotlib.pyplot as plt
+import time
+
+PORT = '/dev/cu.usbmodem101'
+BAUD = 115200
+VREF = 5.0
+SENSITIVITY = 0.0025   # V/kPa
+GAIN = 2001            # Rg = 3 ohm
+SECONDS = 10
+
+ser = serial.Serial(PORT, BAUD, timeout=0.2)
+time.sleep(2)
+ser.reset_input_buffer()
+
+print("Triggering Arduino...")
+ser.write(b's')
+
+times = []
+voltages = []
+pressures_kpa = []
+
+baseline_voltages = []
+baseline_voltage = 0.0
+
+recording_started = False
+breathing_started = False
+recording_finished = False
+breath_start_time = None
+last_plot = 0.0
+
+plt.ion()
+
+# Figure 1: Voltage
+fig1, ax1 = plt.subplots(figsize=(10, 4))
+line_v, = ax1.plot([], [], 'b-')
+ax1.set_xlabel("Time (s)")
+ax1.set_ylabel("Voltage (V)")
+ax1.grid(True)
+ax1.set_title("Tube Pressure Voltage")
+
+# Figure 2: Pressure
+fig2, ax2 = plt.subplots(figsize=(10, 4))
+line_p, = ax2.plot([], [], 'r-')
+ax2.set_xlabel("Time (s)")
+ax2.set_ylabel("Gauge Pressure (kPa)")
+ax2.grid(True)
+ax2.set_title("Tube Pressure Relative to Ambient")
+
+try:
+    overall_start = time.time()
+
+    while True:
+        if time.time() - overall_start > 30:
+            print("Timed out waiting for acquisition to finish.")
+            break
+
+        raw = ser.readline().decode(errors='ignore').strip()
+        if not raw:
+            continue
+
+        if raw.startswith("B,"):
+            try:
+                adc = float(raw.split(",")[1])
+            except (ValueError, IndexError):
+                continue
+            baseline_voltages.append(adc * VREF / 1023.0)
+            continue
+
+        if raw == "START":
+            if not baseline_voltages:
+                print("No baseline samples received.")
+                break
+
+            baseline_voltage = sum(baseline_voltages) / len(baseline_voltages)
+            print("Baseline voltage:", baseline_voltage, "V")
+            recording_started = True
+            continue
+
+        if raw == "END":
+            recording_finished = True
+            break
+
+        if not recording_started:
+            continue
+
+        try:
+            adc = float(raw)
+        except ValueError:
+            continue
+
+        voltage = adc * VREF / 1023.0
+        delta_voltage = voltage - baseline_voltage
+        pressure_kpa = delta_voltage / (SENSITIVITY * GAIN)
+
+        # Start plotting only once pressure clearly moves away from baseline
+        if not breathing_started:
+            if abs(pressure_kpa) > 0.01:
+                breathing_started = True
+                breath_start_time = time.time()
+            else:
+                continue
+
+        t = time.time() - breath_start_time
+
+        times.append(t)
+        voltages.append(voltage)
+        pressures_kpa.append(pressure_kpa)
+
+        if t - last_plot > 0.05:
+            line_v.set_xdata(times)
+            line_v.set_ydata(voltages)
+            line_p.set_xdata(times)
+            line_p.set_ydata(pressures_kpa)
+
+            ax1.relim()
+            ax1.autoscale_view(scaley=True)
+            ax2.relim()
+            ax2.autoscale_view(scaley=True)
+
+            plt.pause(0.001)
+            last_plot = t
+
+finally:
+    ser.close()
+    plt.ioff()
+    plt.show()
+
+if voltages:
+    print("Min voltage:", min(voltages), "V")
+    print("Max voltage:", max(voltages), "V")
+    print("Peak-to-peak voltage:", max(voltages) - min(voltages), "V")
+
+    print("Min pressure:", min(pressures_kpa), "kPa")
+    print("Max pressure:", max(pressures_kpa), "kPa")
+    print("Peak-to-peak pressure:", max(pressures_kpa) - min(pressures_kpa), "kPa")
+else:
+    print("No data received.")
